@@ -151,7 +151,7 @@ namespace Xnet.Internals
 
             var Type = Packet.GetType();
             var Interface = typeof(IPacketHandler<>).MakeGenericType(Type);
-            if (Interface is null)
+            if (Type.IsAssignableTo(Interface) == false)
                 yield break;
 
             yield return typeof(GenericAdapter<>)

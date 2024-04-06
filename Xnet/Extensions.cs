@@ -4,6 +4,7 @@ using System.Reflection.Metadata;
 using System.Runtime.InteropServices;
 using Xnet.Internals;
 using Xnet.Internals.Hosting;
+using Xnet.Internals.Protocols;
 using Xnet.Internals.Startup;
 using Xnet.Packets;
 using Xnet.Packets.Impls;
@@ -36,19 +37,35 @@ namespace Xnet
         /// <returns></returns>
         public static IServiceCollection AddXnet(this IServiceCollection Services, Action<INetworkBuilder> Configure = null)
         {
-            Configure?.Invoke(new NetworkBuilder
+            var Nb = new NetworkBuilder
             {
                 Services = Services
-            });
+            };
+
+            Configure?.Invoke(Nb);
 
             if (Services.Any(X => X.ServiceType == typeof(Dummy)))
                 return Services;
+
+
+            Nb
+                .UseGreeter<PingPong.Greeter>()
+                .UseHandler<PingPong.Hooker>()
+                .UseMapper(Mapper =>
+                {
+                    Mapper
+                        .Map<PingPong.Ping>()
+                        .Map<PingPong.Pong>();
+                });
 
             return Services
                 .AddSingleton<Dummy>()
                 .AddSingleton<ClientQueue>()
                 .AddSingleton<ILauncher, Launcher>()
-                .AddHostedService<Client>();
+                .AddSingleton<PingPong.Manager>()
+                .AddScoped<PingPong.State>()
+                .AddHostedService<Client>()
+                .AddHostedService<PingPong.Service>();
         }
 
         /// <summary>

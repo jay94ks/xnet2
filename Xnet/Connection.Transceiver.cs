@@ -51,9 +51,10 @@ namespace Xnet
             var Payload = Array.Empty<byte>();
             var Queue = new Queue<IPacket>();
 
+
             while (Closing.IsCancellationRequested == false)
             {
-                switch(m_State)
+                switch (m_State)
                 {
                     case State.WAIT_HEADER:
                         if (TryInterpretHeader(Header, ref Payload) == false)
