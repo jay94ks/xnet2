@@ -58,9 +58,18 @@ namespace Xnet
                         .Map<PingPong.Pong>();
                 });
 
+            // --> redirect to connection accessor.
+            Services.AddTransient(Services =>
+            {
+                return Services
+                    .GetRequiredService<ConnectionAccessor>()
+                    .Current;
+            });
+
             return Services
                 .AddSingleton<Dummy>()
                 .AddSingleton<ClientQueue>()
+                .AddSingleton<ConnectionAccessor>()
                 .AddSingleton<ILauncher, Launcher>()
                 .AddSingleton<PingPong.Manager>()
                 .AddScoped<PingPong.State>()

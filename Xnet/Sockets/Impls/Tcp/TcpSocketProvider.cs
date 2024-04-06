@@ -2,7 +2,7 @@
 using System.Net.Sockets;
 using DSocket = System.Net.Sockets.Socket;
 
-namespace Xnet.Sockets.Impls
+namespace Xnet.Sockets.Impls.Tcp
 {
     /// <summary>
     /// Tcp socket provider.

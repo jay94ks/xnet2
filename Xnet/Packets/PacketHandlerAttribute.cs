@@ -6,7 +6,7 @@ namespace Xnet.Packets
     /// <summary>
     /// Packet handler attribute.
     /// </summary>
-    [AttributeUsage(AttributeTargets.Class | AttributeTargets.Struct)]
+    [AttributeUsage(AttributeTargets.Class | AttributeTargets.Struct, AllowMultiple = true)]
     public class PacketHandlerAttribute : Attribute, IPacketHandler
     {
         /// <summary>

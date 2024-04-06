@@ -1,4 +1,5 @@
 ﻿using System.Buffers.Binary;
+using System.Collections.Concurrent;
 using System.Diagnostics;
 using System.Text;
 using Xnet.Internals;
@@ -35,6 +36,7 @@ namespace Xnet
 
         // ---
         private readonly SocketBuffer m_RecvBuf = new();
+        private readonly ConcurrentDictionary<Guid, TaskCompletionSource<IResponse>> m_Pendings = new();
         private State m_State = State.WAIT_HEADER;
 
         private ushort m_RecvMagic = 0;
@@ -50,42 +52,46 @@ namespace Xnet
             var Header = new byte[HEADER_LEN];
             var Payload = Array.Empty<byte>();
             var Queue = new Queue<IPacket>();
-
-
-            while (Closing.IsCancellationRequested == false)
+            var Temp = m_Accessor.SetCurrent(this);
+            try
             {
-                switch (m_State)
+                while (Closing.IsCancellationRequested == false)
                 {
-                    case State.WAIT_HEADER:
-                        if (TryInterpretHeader(Header, ref Payload) == false)
-                            break; // --> more bytes required.
+                    switch (m_State)
+                    {
+                        case State.WAIT_HEADER:
+                            if (TryInterpretHeader(Header, ref Payload) == false)
+                                break; // --> more bytes required.
 
-                        continue;
+                            continue;
 
-                    case State.WAIT_PAYLOAD:
-                        if (TryWaitForPayload(Payload) == false)
-                            break; // --> more bytes required.
+                        case State.WAIT_PAYLOAD:
+                            if (TryWaitForPayload(Payload) == false)
+                                break; // --> more bytes required.
 
-                        continue;
+                            continue;
 
-                    case State.DECODE_MESSAGE:
-                        {
-                            var Packet = TryDecodePacket(m_RecvGuid, Payload);
-                            if (Packet != null)
-                                Queue.Enqueue(Packet);
+                        case State.DECODE_MESSAGE:
+                            {
+                                var Packet = TryDecodePacket(m_RecvGuid, Payload);
+                                if (Packet != null)
+                                    Queue.Enqueue(Packet);
 
-                            m_State = State.WAIT_HEADER;
-                        }
-                        continue;
+                                m_State = State.WAIT_HEADER;
+                            }
+                            continue;
+                    }
+
+                    while (Queue.TryDequeue(out var Packet))
+                        await HandleAsync(Packet);
+
+                    await ReceiveAsync();
                 }
-
-                while (Queue.TryDequeue(out var Packet))
-                    await HandleAsync(Packet);
-
-                await ReceiveAsync();
             }
+
+            finally { m_Accessor.SetCurrent(Temp); }
         }
-        
+
         /// <summary>
         /// Try to interpret header.
         /// </summary>
@@ -163,6 +169,9 @@ namespace Xnet
             using var Stream = new MemoryStream(Payload, false);
             using var Reader = new BinaryReader(Stream, Encoding.UTF8, true);
 
+            if (Instance is IResponse Response)
+                Response.RequestId = new Guid(Reader.ReadBytes(16));
+
             if (Debugger.IsAttached)
             {
                 Instance.Decode(Reader);
@@ -216,27 +225,38 @@ namespace Xnet
                 if (Encoder.TryGetPacketId(Packet, out var PacketId) == false)
                     continue;
 
-                using var Stream = new MemoryStream();
-                EnsureHeader(Stream, PacketId);
-
-                var Remind = Stream.Position;
-                using var Writer = new BinaryWriter(Stream, Encoding.UTF8, true);
-
-                if (Debugger.IsAttached)
-                    Packet.Encode(Writer);
-
-                else
+                var Temp = m_Accessor.SetCurrent(this);
+                try
                 {
-                    try { Packet.Encode(Writer); }
-                    catch
-                    {
-                        Kick();
-                        return null;
-                    }
-                }
+                    using var Stream = new MemoryStream();
+                    EnsureHeader(Stream, PacketId);
 
-                EnsureHeader(Stream, PacketId, (ushort)(Stream.Position - Remind));
-                return Stream.ToArray();
+                    var Remind = Stream.Position;
+                    using var Writer = new BinaryWriter(Stream, Encoding.UTF8, true);
+
+                    if (Packet is IRequest Request)
+                        Writer.Write(Request.RequestId.ToByteArray());
+
+                    if (Debugger.IsAttached)
+                        Packet.Encode(Writer);
+
+                    else
+                    {
+                        try { Packet.Encode(Writer); }
+                        catch
+                        {
+                            Kick();
+                            return null;
+                        }
+                    }
+
+                    EnsureHeader(Stream, PacketId, (ushort)(Stream.Position - Remind));
+                    return Stream.ToArray();
+                }
+                finally
+                {
+                    m_Accessor.SetCurrent(Temp);
+                }
             }
 
             return null;
@@ -261,47 +281,6 @@ namespace Xnet
         }
 
         /// <summary>
-        /// Emit a packet to the remote host asynchronously.
-        /// </summary>
-        /// <param name="Packet"></param>
-        /// <param name="Token"></param>
-        /// <returns></returns>
-        public async Task<bool> EmitAsync(IPacket Packet, CancellationToken Token = default)
-        {
-            var Bytes = Encode(Packet);
-            if (Bytes is null)
-                return false;
-
-            try { await m_EmitLock.WaitAsync(Token); }
-            catch
-            {
-                return false;
-            }
-            try
-            {
-                var Segment = new ArraySegment<byte>(Bytes);
-                while (Segment.Count > 0)
-                {
-                    var Length = await m_Socket.SendAsync(Segment);
-                    if (Length <= 0)
-                        break;
-
-                    Segment = Segment.Slice(Length);
-                }
-
-                return Segment.Count <= 0;
-            }
-
-            finally
-            {
-                try { m_EmitLock.Release(); }
-                catch
-                {
-                }
-            }
-        }
-
-        /// <summary>
         /// Handle the packet asynchronously.
         /// </summary>
         /// <param name="Packet"></param>
@@ -310,7 +289,43 @@ namespace Xnet
         {
             var Extras = Packet.GetHandlersIfPossible();
             return m_Handlers.Concat(Extras).Pipeline(
-                (Handler, Next) => Handler.HandleAsync(this, Packet, Next));
+                (Handler, Next) => Handler.HandleAsync(this, Packet, Next),
+                () => HandleRequestAsync(Packet));
+        }
+
+        /// <summary>
+        /// Handle the request packet and generate response packet.
+        /// </summary>
+        /// <param name="Packet"></param>
+        /// <returns></returns>
+        private async Task HandleRequestAsync(IPacket Packet)
+        {
+            if (Packet is IResponse Response)
+                DispatchResponse(Response);
+
+            if (Packet is not IRequest Request)
+                return;
+
+            Response = await Request.HandleAsync(this);
+            if (Response != null && await EmitAsync(Response))
+                return;
+
+            Kick();
+        }
+
+        /// <summary>
+        /// Dispatch the response packet.
+        /// </summary>
+        /// <param name="Response"></param>
+        private void DispatchResponse(IResponse Response)
+        {
+            if (m_Pendings.TryGetValue(Response.RequestId, out var Tcs))
+            {
+                if (Tcs is null)
+                    m_Pendings.Remove(Response.RequestId, out _);
+
+                Tcs?.TrySetResult(Response);
+            }
         }
     }
 }

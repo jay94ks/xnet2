@@ -17,6 +17,11 @@ namespace Xnet.Sockets
         /// e.g. tcp, rudp, ...
         /// </summary>
         public abstract string Name { get; }
+
+        /// <summary>
+        /// Returns whether the system supports quic transport.
+        /// </summary>
+        public virtual bool IsSupported => true;
         
         /// <summary>
         /// Connect to the remote host.
